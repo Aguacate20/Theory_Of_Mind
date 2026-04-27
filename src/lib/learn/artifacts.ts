@@ -1,5 +1,13 @@
 export type Relation = "apoya" | "contradice" | "matiza" | "extiende";
 
+export type DepositedArtifact = {
+  id: string;
+  node: ArtifactNode;
+  relation?: string;
+  deposited_by?: string;
+  group?: number;
+};
+
 export type ArtifactNode =
   | "falsa_creencia"
   | "tomm"
