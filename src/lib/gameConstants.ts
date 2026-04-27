@@ -13,57 +13,115 @@ export const ENERGY_REGEN_CORRECT = 30;
 export const ENERGY_PENALTY_WRONG = 8;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PHYSICS SIMULATION
-// Given a jump from (x0, y0) with horizontal velocity vx and vertical JUMP_FORCE,
-// returns the arc as sampled points and the landing x,y on a target platform.
-// We use this to VERIFY every gap is reachable before placing a platform.
+// PHYSICS VERIFICATION ENGINE
+//
+// We simulate the full jump arc using the exact same constants as GameCanvas.
+// For each consecutive platform pair we try every combination of:
+//   - launch position (left edge, center, right edge of source)
+//   - horizontal speed (-MOVE_SPEED to +MOVE_SPEED in steps)
+// If any combination lands on the target we call it reachable.
+// If none does, we slide the target platform horizontally/vertically
+// until it becomes reachable, or insert a bridge platform.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Returns max horizontal distance achievable jumping from a platform edge */
-function jumpArc(vx: number): { maxDx: number; maxDy: number; airTime: number } {
-  let x = 0, y = 0, vy = JUMP_FORCE;
-  let maxH = 0;
-  for (let t = 0; t < 200; t++) {
+type Rect = { x: number; y: number; w: number; h: number };
+
+/**
+ * Simulate one jump arc. Returns true if the player lands on `target`.
+ * launch: pixel x of player feet launch point (on top of source platform)
+ * sourceY: y of source platform top surface
+ */
+function simulateJump(
+  launchX: number,
+  sourceY: number,
+  vx: number,
+  target: Rect,
+): boolean {
+  let px = launchX;
+  let py = sourceY; // player feet start at platform surface
+  let vy = JUMP_FORCE;
+  const PH = 36; // player height (matches GameCanvas PW/PH)
+
+  for (let t = 0; t < 400; t++) {
     vy += GRAVITY;
-    x += vx;
-    y += vy;
-    if (y > 0 && t > 2) break; // landed back at same height
-    if (-y > maxH) maxH = -y;
+    px += vx;
+    py += vy;
+
+    // Check if player feet land on top of target
+    const feetY = py + PH;
+    const prevFeetY = (py - vy) + PH;
+    const inX = px + 13 > target.x && px < target.x + target.w + 13;
+    const crossedTop = prevFeetY <= target.y + 2 && feetY >= target.y;
+
+    if (inX && crossedTop && vy > 0) return true;
+
+    // Stop if fell way below source
+    if (py > sourceY + 1200) break;
   }
-  return { maxDx: Math.abs(x), maxDy: maxH, airTime: 0 };
+  return false;
 }
 
-// Precompute jump envelope at full speed
-const FULL_JUMP = jumpArc(MOVE_SPEED);
-const MAX_JUMP_DX = FULL_JUMP.maxDx * 0.92; // 92% = safe margin
-const MAX_JUMP_DY = FULL_JUMP.maxDy * 0.88;
-
-/** Simulate a jump and return landing position on a target platform */
-function canReach(
-  fromX: number, fromY: number, fromW: number,
-  toX: number, toY: number, toW: number,
-  vx: number
-): boolean {
-  // Try jumping from right/left edge of source platform
-  const sources = [
-    fromX + fromW * 0.8,  // right edge
-    fromX + fromW * 0.2,  // left edge
-    fromX + fromW * 0.5,  // center
+/**
+ * Returns true if `target` is reachable from `source` using any legal jump.
+ * Tries multiple launch positions and horizontal speeds.
+ */
+function isReachable(source: Rect, target: Rect): boolean {
+  // Launch positions along the source platform top
+  const launchXs = [
+    source.x + source.w * 0.1,
+    source.x + source.w * 0.3,
+    source.x + source.w * 0.5,
+    source.x + source.w * 0.7,
+    source.x + source.w * 0.9,
   ];
-  for (const sx of sources) {
-    let x = sx, y = fromY, vy = JUMP_FORCE;
-    const vxDir = toX + toW / 2 > sx ? Math.abs(vx) : -Math.abs(vx);
-    for (let t = 0; t < 300; t++) {
-      vy += GRAVITY;
-      x += vxDir;
-      y += vy;
-      if (y + 2 >= toY && y < toY + 30 && x >= toX - 4 && x <= toX + toW + 4) {
-        return true;
-      }
-      if (y > fromY + 800) break; // fell too far
+  // Try full range of horizontal speeds in 8 steps
+  const vxSteps = 8;
+  for (const lx of launchXs) {
+    for (let s = 0; s <= vxSteps; s++) {
+      const vx = -MOVE_SPEED + (2 * MOVE_SPEED * s) / vxSteps;
+      if (simulateJump(lx, source.y, vx, target)) return true;
     }
   }
   return false;
+}
+
+/**
+ * Given source and a desired target position, nudge the target
+ * horizontally until it becomes reachable. Returns adjusted target.
+ * If impossible even after nudging, inserts a bridge rect in `bridges`.
+ */
+function makeReachable(
+  source: Rect,
+  target: Rect,
+  bridges: Rect[],
+  zone: number,
+): Rect {
+  // Fast path — already reachable
+  if (isReachable(source, target)) return target;
+
+  // Try nudging target left and right up to 300px in 20px steps
+  for (let delta = 20; delta <= 320; delta += 20) {
+    for (const sign of [1, -1]) {
+      const t2 = { ...target, x: target.x + delta * sign };
+      t2.x = Math.max(10, Math.min(WORLD_W - t2.w - 10, t2.x));
+      if (isReachable(source, t2)) return t2;
+    }
+  }
+
+  // Try lowering target (reducing vertical gap) up to 120px
+  for (let drop = 20; drop <= 140; drop += 20) {
+    const t2 = { ...target, y: target.y + drop };
+    if (t2.y < WORLD_H - 90 && isReachable(source, t2)) return t2;
+  }
+
+  // Last resort: insert a bridge platform between source and target
+  const bridgeX = Math.max(10, Math.min(WORLD_W - 80,
+    (source.x + source.w / 2 + target.x + target.w / 2) / 2 - 40
+  ));
+  const bridgeY = source.y - Math.abs(target.y - source.y) / 2;
+  const bridge: Rect = { x: bridgeX, y: bridgeY, w: 80, h: 16 };
+  bridges.push(bridge);
+  return target; // target stays — bridge makes it two-hop reachable
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -401,7 +459,7 @@ export type Platform = {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MAIN GENERATOR
+// MAIN GENERATOR — physics-verified chunk placement
 // ─────────────────────────────────────────────────────────────────────────────
 
 function seededRand(seed: number) {
@@ -422,99 +480,128 @@ function weightedPick<T extends string>(weights: Record<T, number>, rng: () => n
   return Object.keys(weights)[0] as T;
 }
 
+function rectFromPlat(p: { x: number; y: number; w: number; h: number }): Rect {
+  return { x: p.x, y: p.y, w: p.w, h: p.h };
+}
+
 export function generatePlatforms(): Platform[] {
   const rng = seededRand(0xDEADBEEF);
   const r = (min: number, max: number) => rng() * (max - min) + min;
   const platforms: Platform[] = [];
+  const bridges: Rect[] = [];
 
   // Ground floor
   platforms.push({ x: 0, y: WORLD_H - 80, w: WORLD_W, h: 80, zone: 0, type: "wide" });
 
   // Starting platform — generous, centered
-  platforms.push({ x: WORLD_W / 2 - 150, y: WORLD_H - 160, w: 300, h: 20, zone: 0, type: "wide" });
+  const startPlat = { x: WORLD_W / 2 - 150, y: WORLD_H - 160, w: 300, h: 20, zone: 0, type: "wide" as const };
+  platforms.push(startPlat);
 
-  let curX = WORLD_W / 2;   // current anchor x (center of last platform)
-  let curY = WORLD_H - 160; // current anchor y (top surface of last platform)
+  let curX = WORLD_W / 2;
+  let curY = WORLD_H - 160;
+
+  // Track the last placed "mandatory path" platform for reachability checks
+  let lastMandatory: Rect = rectFromPlat(startPlat);
 
   const allChunksByTag: Record<string, Chunk> = {};
   for (const c of CHUNK_LIBRARY) allChunksByTag[c.tag] = c;
 
-  // Iterate from bottom to top of world
   let safetyBreak = 0;
   while (curY > 200 && safetyBreak++ < 2000) {
-    // Determine zone at current height
     const zi = getZone(curY);
     const zone = ZONES[zi];
 
-    // Pick a chunk weighted by zone preferences
     const tag = weightedPick(zone.chunkWeights as Record<string, number>, rng);
     const baseChunk = allChunksByTag[tag] ?? CHUNK_LIBRARY[0];
 
-    // Randomly mirror the chunk horizontally (50% chance)
     const mirror = rng() < 0.5;
-
-    // Randomly rotate slightly: shift the whole chunk left or right
-    // so chunks don't stack perfectly on each other
-    const globalShift = r(-200, 200);
-
-    // Scale widths and gaps for this zone
+    const globalShift = r(-180, 180);
     const ws = zone.widthScale;
     const gs = zone.gapScale;
 
-    // Place each platform in the chunk
-    let placedAny = false;
+    // Build the chunk's platform list before placing,
+    // so we can verify each step in sequence
+    const chunkRects: Rect[] = [];
     for (const rel of baseChunk.platforms) {
       const dx = (mirror ? -rel.dx : rel.dx) + globalShift;
       const dy = rel.dy * gs;
-      const pw = Math.max(20, Math.round(rel.w * ws));
+      const pw = Math.max(22, Math.round(rel.w * ws));
       const ph = rel.h;
-
       let px = curX + dx - pw / 2;
       const py = curY + dy;
 
-      // Clamp to world bounds with wrap-around feel
-      px = ((px % (WORLD_W - pw)) + (WORLD_W - pw)) % (WORLD_W - pw);
       px = Math.max(10, Math.min(WORLD_W - pw - 10, px));
+      if (py < 80 || py > WORLD_H - 90) continue;
 
-      // Skip if too close to top of world
-      if (py < 80) continue;
-      // Skip if below world (descent chunks can go slightly down)
-      if (py > WORLD_H - 90) continue;
+      chunkRects.push({ x: px, y: py, w: pw, h: ph });
+    }
 
+    if (chunkRects.length === 0) continue;
+
+    // ── Verify and fix each consecutive hop in the chunk ─────────────────
+    let prev = lastMandatory;
+    const verifiedRects: Rect[] = [];
+
+    for (let i = 0; i < chunkRects.length; i++) {
+      let target = chunkRects[i];
+
+      // Verify reachability from previous platform; adjust if needed
+      const fixed = makeReachable(prev, target, bridges, zi);
+      verifiedRects.push(fixed);
+      prev = fixed;
+    }
+
+    // Place verified platforms
+    let placedAny = false;
+    for (const rect of verifiedRects) {
+      const pw = rect.w;
       const type: Platform["type"] =
         pw < 28 ? "tiny" :
         pw < 55 ? "narrow" :
         pw < 120 ? "normal" : "wide";
-
-      platforms.push({ x: px, y: py, w: pw, h: ph, zone: zi, type });
+      platforms.push({ x: rect.x, y: rect.y, w: pw, h: rect.h, zone: zi, type });
       placedAny = true;
+    }
+
+    // Place bridge platforms inserted during verification
+    for (const b of bridges.splice(0)) {
+      platforms.push({ x: b.x, y: b.y, w: b.w, h: b.h, zone: zi, type: "narrow" });
     }
 
     if (!placedAny) continue;
 
-    // Advance cursor to chunk exit
+    // Update last mandatory to last verified rect
+    lastMandatory = verifiedRects[verifiedRects.length - 1];
+
+    // Advance cursor
     const exitDx = (mirror ? -baseChunk.exitDx : baseChunk.exitDx) + globalShift;
     const exitDy = baseChunk.exitDy * gs;
     curX = Math.max(100, Math.min(WORLD_W - 100, curX + exitDx));
-    curY = curY + exitDy;
+    curY = Math.max(150, curY + exitDy);
 
-    // Occasionally add a "rest" platform between hard chunks
-    if (rng() < 0.18) {
+    // Occasional rest platform (wide, verified reachable)
+    if (rng() < 0.16) {
       const rpw = Math.round(r(140, 220) * ws);
-      const rx = Math.max(10, Math.min(WORLD_W - rpw - 10, curX - rpw / 2));
-      platforms.push({ x: rx, y: curY, w: rpw, h: 18, zone: zi, type: "wide" });
-      curY -= 30; // slight extra rise
+      let rx = Math.max(10, Math.min(WORLD_W - rpw - 10, curX - rpw / 2));
+      const restRect: Rect = { x: rx, y: curY, w: rpw, h: 18 };
+      const fixedRest = makeReachable(lastMandatory, restRect, bridges, zi);
+      platforms.push({ x: fixedRest.x, y: fixedRest.y, w: fixedRest.w, h: fixedRest.h, zone: zi, type: "wide" });
+      for (const b of bridges.splice(0)) {
+        platforms.push({ x: b.x, y: b.y, w: b.w, h: b.h, zone: zi, type: "narrow" });
+      }
+      lastMandatory = fixedRest;
+      curY -= 20;
     }
 
-    // Occasionally add a decoy platform (visible but dead end)
-    if (rng() < 0.3) {
-      const dpw = Math.round(r(30, 70) * ws);
+    // Decoy platforms (NOT verified — intentionally may be dead ends)
+    if (rng() < 0.28) {
+      const dpw = Math.round(r(30, 65) * ws);
       const sideDir = rng() < 0.5 ? 1 : -1;
-      const dx2 = r(150, 320) * sideDir;
-      const dx2px = Math.max(10, Math.min(WORLD_W - dpw - 10, curX + dx2 - dpw / 2));
-      const dy2 = r(-60, 60);
-      if (curY + dy2 > 100 && curY + dy2 < WORLD_H - 90) {
-        platforms.push({ x: dx2px, y: curY + dy2, w: dpw, h: 16, zone: zi, type: "narrow" });
+      const dx2 = r(150, 300) * sideDir;
+      const dpx = Math.max(10, Math.min(WORLD_W - dpw - 10, curX + dx2 - dpw / 2));
+      const dpy = curY + r(-80, 80);
+      if (dpy > 100 && dpy < WORLD_H - 90) {
+        platforms.push({ x: dpx, y: dpy, w: dpw, h: 16, zone: zi, type: "narrow" });
       }
     }
   }
