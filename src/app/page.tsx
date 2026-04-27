@@ -16,6 +16,11 @@ export default function Home() {
   const [stage, setStage] = useState<Stage>("activity");
 
   // ── Activity selection ─────────────────────────────────────────────────────
+  const [role, setRole] = useState<Role>("student");
+  const [name, setName] = useState("");
+  const [character, setCharacter] = useState<CharacterDef | null>(null);
+  const [sessionId] = useState(generateId);
+  
   if (stage === "activity") return (
     <main style={{ minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", padding:"2rem" }}>
       <div style={{ width:"100%", maxWidth:480 }}>
@@ -47,10 +52,6 @@ export default function Home() {
       </div>
     </main>
   );
-  const [role, setRole] = useState<Role>("student");
-  const [name, setName] = useState("");
-  const [character, setCharacter] = useState<CharacterDef | null>(null);
-  const [sessionId] = useState(generateId);
 
   // ── Role selection ────────────────────────────────────────────────────────
   if (stage === "role") {
