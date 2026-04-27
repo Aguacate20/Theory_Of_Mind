@@ -1,26 +1,28 @@
 "use client";
 import { useEffect, useRef, useState, useCallback } from "react";
 import {
-  CANVAS_W, CANVAS_H, GRAVITY, JUMP_FORCE, MOVE_SPEED,
+  CANVAS_W, CANVAS_H, WORLD_W, WORLD_H,
+  GRAVITY, JUMP_FORCE, MOVE_SPEED,
   ENERGY_MOVE_COST, ENERGY_JUMP_COST, ENERGY_REGEN_CORRECT, ENERGY_PENALTY_WRONG,
-  ZONES, getZone, generatePlatforms, CHECKPOINTS, Platform,
+  ZONES, getZone, getSkyColors, generatePlatforms, CHECKPOINTS, Platform,
 } from "@/lib/gameConstants";
 import { QUESTIONS, Question } from "@/lib/questions";
 import { supabase, PlayerRow } from "@/lib/supabase";
+import { CharacterDef, drawCharacter } from "@/lib/characters";
 
 type Player = {
   x: number; worldY: number;
   vx: number; vy: number;
-  w: number; h: number;
   onGround: boolean;
+  facingLeft: boolean;
 };
 
-type GameStats = { correct: number; total: number; answeredIds: Set<number> };
+type GameStats = { correct: number; total: number };
+type Cam = { x: number; y: number };
 
-const PLAYER_W = 22, PLAYER_H = 28;
-const WORLD_H = 6000;
+const PW = 26, PH = 36;
 
-function shuffleArray<T>(arr: T[]): T[] {
+function shuffle<T>(arr: T[]): T[] {
   const a = [...arr];
   for (let i = a.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
@@ -29,24 +31,41 @@ function shuffleArray<T>(arr: T[]): T[] {
   return a;
 }
 
+// Pre-generate star positions (deterministic)
+const STARS = Array.from({ length: 200 }, (_, i) => ({
+  x: ((i * 2971 + 13) % WORLD_W),
+  y: ((i * 1637 + 7) % 1400),   // top part of world
+  r: 0.6 + (i % 4) * 0.35,
+  twinkle: (i % 7) * 0.9,
+}));
+
 export default function GameCanvas({
-  playerName, sessionId,
+  playerName, sessionId, character, isTeacher,
 }: {
-  playerName: string; sessionId: string;
+  playerName: string;
+  sessionId: string;
+  character: CharacterDef;
+  isTeacher: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stateRef = useRef({
-    player: { x: CANVAS_W / 2 - 11, worldY: 5860, vx: 0, vy: 0, w: PLAYER_W, h: PLAYER_H, onGround: false } as Player,
-    energy: 100,
-    camY: 0,
+    player: {
+      x: WORLD_W / 2 - PW / 2,
+      worldY: WORLD_H - 150,
+      vx: 0, vy: 0, onGround: false, facingLeft: false,
+    } as Player,
+    energy: isTeacher ? 999 : 100,
+    cam: { x: 0, y: WORLD_H - CANVAS_H } as Cam,
     platforms: [] as Platform[],
     keys: {} as Record<string, boolean>,
-    checkpointY: 5860,
+    checkpointY: WORLD_H - 150,
+    checkpointX: WORLD_W / 2 - PW / 2,
     questionOpen: false,
-    gameOver: false,
     zone: 0,
-    stats: { correct: 0, total: 0, answeredIds: new Set<number>() } as GameStats,
+    stats: { correct: 0, total: 0 } as GameStats,
     questionQueue: [] as Question[],
+    frame: 0,
+    otherPlayers: [] as PlayerRow[],
   });
   const animRef = useRef<number>(0);
   const lastSyncRef = useRef(0);
@@ -55,28 +74,26 @@ export default function GameCanvas({
   const [answered, setAnswered] = useState<null | "correct" | "wrong">(null);
   const [explanation, setExplanation] = useState("");
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
-  const [energy, setEnergy] = useState(100);
+  const [energy, setEnergy] = useState(isTeacher ? 100 : 100);
   const [zone, setZone] = useState(0);
   const [height, setHeight] = useState(0);
   const [stats, setStats] = useState({ correct: 0, total: 0 });
   const [leaderboard, setLeaderboard] = useState<PlayerRow[]>([]);
-  const [checkpoint, setCheckpoint] = useState(5860);
 
-  // ── init ──────────────────────────────────────────────────────────────────
+  // Init
   useEffect(() => {
     stateRef.current.platforms = generatePlatforms();
-    stateRef.current.questionQueue = shuffleArray(QUESTIONS);
+    stateRef.current.questionQueue = shuffle(QUESTIONS);
 
-    // Subscribe to realtime leaderboard
     const channel = supabase
-      .channel("leaderboard")
+      .channel("lb_" + sessionId)
       .on("postgres_changes", { event: "*", schema: "public", table: "players" }, () => {
         fetchLeaderboard();
       })
       .subscribe();
 
     fetchLeaderboard();
-    loop();
+    animRef.current = requestAnimationFrame(loop);
 
     return () => {
       cancelAnimationFrame(animRef.current);
@@ -88,35 +105,33 @@ export default function GameCanvas({
     const { data } = await supabase
       .from("players")
       .select("*")
-      .order("height", { ascending: true })
-      .limit(10);
-    if (data) setLeaderboard(data as PlayerRow[]);
+      .order("height", { ascending: false })
+      .limit(15);
+    if (data) {
+      setLeaderboard(data as PlayerRow[]);
+      stateRef.current.otherPlayers = (data as PlayerRow[]).filter(p => p.id !== sessionId);
+    }
   }
 
   async function syncToSupabase() {
     const s = stateRef.current;
-    const worldYVal = s.player.worldY;
-    const heightM = Math.round((WORLD_H - worldYVal) / 10);
+    const h = Math.round((WORLD_H - s.player.worldY) / 10);
     await supabase.from("players").upsert({
       id: sessionId,
       name: playerName,
-      height: heightM,
+      height: h,
       zone: s.zone,
-      energy: Math.round(s.energy),
+      energy: Math.round(Math.min(s.energy, 100)),
       correct: s.stats.correct,
       total: s.stats.total,
       updated_at: new Date().toISOString(),
     });
   }
 
-  // ── question system ───────────────────────────────────────────────────────
   const openQuestion = useCallback(() => {
     const s = stateRef.current;
-    if (s.questionOpen || s.gameOver) return;
-    // Refill queue if exhausted
-    if (s.questionQueue.length === 0) {
-      s.questionQueue = shuffleArray(QUESTIONS);
-    }
+    if (s.questionOpen) return;
+    if (s.questionQueue.length === 0) s.questionQueue = shuffle(QUESTIONS);
     const q = s.questionQueue.shift()!;
     s.questionOpen = true;
     setQuestionModal(q);
@@ -134,23 +149,23 @@ export default function GameCanvas({
     setExplanation(questionModal.explanation);
     s.stats.total += 1;
     if (correct) {
-      s.energy = Math.min(100, s.energy + ENERGY_REGEN_CORRECT);
+      s.energy = Math.min(isTeacher ? 999 : 100, s.energy + ENERGY_REGEN_CORRECT);
       s.stats.correct += 1;
     } else {
       s.energy = Math.max(0, s.energy - ENERGY_PENALTY_WRONG);
     }
-    setStats({ correct: s.stats.correct, total: s.stats.total });
+    setStats({ ...s.stats });
     setTimeout(() => {
       setQuestionModal(null);
       s.questionOpen = false;
       syncToSupabase();
-    }, 2800);
+    }, 3000);
   }
 
   function handleReturnToCheckpoint() {
     const s = stateRef.current;
     s.player.worldY = s.checkpointY;
-    s.player.x = CANVAS_W / 2 - 11;
+    s.player.x = s.checkpointX;
     s.player.vx = 0;
     s.player.vy = 0;
   }
@@ -164,24 +179,27 @@ export default function GameCanvas({
 
   function update() {
     const s = stateRef.current;
-    if (s.questionOpen || s.gameOver) return;
+    if (s.questionOpen) return;
     const p = s.player;
+    s.frame++;
 
-    // Movement
-    const canMove = s.energy > 0;
+    const canMove = isTeacher || s.energy > 0;
+
     if (canMove) {
       if (s.keys["ArrowLeft"] || s.keys["a"]) {
         p.vx = -MOVE_SPEED;
-        if (p.onGround) s.energy = Math.max(0, s.energy - ENERGY_MOVE_COST);
+        p.facingLeft = true;
+        if (p.onGround && !isTeacher) s.energy = Math.max(0, s.energy - ENERGY_MOVE_COST);
       } else if (s.keys["ArrowRight"] || s.keys["d"]) {
         p.vx = MOVE_SPEED;
-        if (p.onGround) s.energy = Math.max(0, s.energy - ENERGY_MOVE_COST);
+        p.facingLeft = false;
+        if (p.onGround && !isTeacher) s.energy = Math.max(0, s.energy - ENERGY_MOVE_COST);
       } else {
-        p.vx *= 0.75;
+        p.vx *= 0.78;
       }
       if ((s.keys["ArrowUp"] || s.keys["w"] || s.keys[" "]) && p.onGround) {
         p.vy = JUMP_FORCE;
-        s.energy = Math.max(0, s.energy - ENERGY_JUMP_COST);
+        if (!isTeacher) s.energy = Math.max(0, s.energy - ENERGY_JUMP_COST);
         p.onGround = false;
       }
     } else {
@@ -192,49 +210,51 @@ export default function GameCanvas({
     p.x += p.vx;
     p.worldY += p.vy;
 
-    // Wall wrap
-    if (p.x < -p.w) p.x = CANVAS_W;
-    if (p.x > CANVAS_W) p.x = -p.w;
+    // Horizontal wrap
+    if (p.x + PW < 0) p.x = WORLD_W;
+    if (p.x > WORLD_W) p.x = -PW;
 
     // Platform collision
     p.onGround = false;
     for (const plat of s.platforms) {
-      const inX = p.x + p.w > plat.x && p.x < plat.x + plat.w;
-      const wasAbove = (p.worldY + p.h - p.vy) <= plat.y + 2;
-      const nowBelow = p.worldY + p.h >= plat.y;
-      if (inX && wasAbove && nowBelow && p.vy >= 0) {
-        p.worldY = plat.y - p.h;
+      if (p.x + PW <= plat.x || p.x >= plat.x + plat.w) continue;
+      const prevBottom = p.worldY + PH - p.vy;
+      const curBottom = p.worldY + PH;
+      if (prevBottom <= plat.y + 2 && curBottom >= plat.y && p.vy >= 0) {
+        p.worldY = plat.y - PH;
         p.vy = 0;
         p.onGround = true;
-        // Checkpoint update
-        const cpIdx = CHECKPOINTS.findIndex(cy => Math.abs(plat.y - cy) < 60);
-        if (cpIdx >= 0 && plat.y < s.checkpointY) {
-          s.checkpointY = plat.y;
-          setCheckpoint(plat.y);
+        // Checkpoint detection
+        for (let ci = 0; ci < CHECKPOINTS.length; ci++) {
+          if (Math.abs(plat.y - CHECKPOINTS[ci]) < 80 && plat.y < s.checkpointY) {
+            s.checkpointY = plat.y;
+            s.checkpointX = plat.x + plat.w / 2 - PW / 2;
+          }
         }
         break;
       }
     }
 
-    // Fell below world
-    if (p.worldY > WORLD_H + 200) {
+    // Fell off world
+    if (p.worldY > WORLD_H + 300) {
       p.worldY = s.checkpointY;
-      p.x = CANVAS_W / 2 - 11;
+      p.x = s.checkpointX;
       p.vx = 0; p.vy = 0;
-      s.energy = Math.max(0, s.energy - 15);
+      if (!isTeacher) s.energy = Math.max(0, s.energy - 12);
     }
 
-    // Camera: keep player vertically centered
-    const targetCamY = p.worldY - CANVAS_H * 0.6;
-    s.camY += (targetCamY - s.camY) * 0.1;
+    // Smooth camera — follows player both axes
+    const targetCamX = p.x + PW / 2 - CANVAS_W / 2;
+    const targetCamY = p.worldY + PH / 2 - CANVAS_H * 0.55;
+    s.cam.x += (Math.max(0, Math.min(WORLD_W - CANVAS_W, targetCamX)) - s.cam.x) * 0.1;
+    s.cam.y += (Math.max(0, Math.min(WORLD_H - CANVAS_H, targetCamY)) - s.cam.y) * 0.1;
 
-    // Zone & UI sync
     const newZone = getZone(p.worldY);
     if (newZone !== s.zone) { s.zone = newZone; setZone(newZone); }
-    setEnergy(Math.round(s.energy));
+
+    setEnergy(Math.min(100, Math.round(s.energy)));
     setHeight(Math.round((WORLD_H - p.worldY) / 10));
 
-    // Sync to supabase every 2s
     const now = Date.now();
     if (now - lastSyncRef.current > 2000) {
       lastSyncRef.current = now;
@@ -248,194 +268,339 @@ export default function GameCanvas({
     if (!canvas) return;
     const ctx = canvas.getContext("2d")!;
     const s = stateRef.current;
-    const p = s.player;
-    const camY = s.camY;
-    const z = ZONES[s.zone];
+    const { cam, player: p, frame } = s;
 
-    // Background gradient per zone
+    // --- Background sky (smooth gradient) ---
+    const midWorldY = cam.y + CANVAS_H / 2;
+    const sky = getSkyColors(midWorldY);
     const grad = ctx.createLinearGradient(0, 0, 0, CANVAS_H);
-    grad.addColorStop(0, z.bgTop);
-    grad.addColorStop(1, z.bgBottom);
+    grad.addColorStop(0, sky.top);
+    grad.addColorStop(1, sky.bottom);
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
 
-    // Stars in space zone
-    if (s.zone >= 4) {
+    // Stars (visible in mountain+ zones, fully visible in space)
+    const starAlpha = Math.max(0, Math.min(1, (2400 - midWorldY) / 1000));
+    if (starAlpha > 0.01) {
       ctx.fillStyle = "#ffffff";
-      for (let i = 0; i < 80; i++) {
-        const sx = ((i * 137 + 50) % CANVAS_W);
-        const sy = ((i * 97 + 30) % CANVAS_H);
+      for (const star of STARS) {
+        const sx = ((star.x - cam.x * 0.08) % WORLD_W + WORLD_W) % WORLD_W;
+        const sy = star.y - cam.y * 0.04;
+        if (sy < -10 || sy > CANVAS_H + 10) continue;
+        const twinkle = starAlpha * (0.5 + 0.5 * Math.sin(frame * 0.04 + star.twinkle));
+        ctx.globalAlpha = twinkle;
         ctx.beginPath();
-        ctx.arc(sx, sy, 0.8 + (i % 3) * 0.4, 0, Math.PI * 2);
+        ctx.arc(sx, sy, star.r, 0, Math.PI * 2);
         ctx.fill();
       }
+      ctx.globalAlpha = 1;
     }
 
+    // Parallax clouds/mountains in background
+    drawParallaxBg(ctx, cam, midWorldY, frame);
+
     ctx.save();
-    ctx.translate(0, -camY);
+    ctx.translate(-cam.x, -cam.y);
 
     // Draw platforms
     for (const plat of s.platforms) {
-      const screenY = plat.y - camY;
-      if (screenY > CANVAS_H + 60 || screenY < -60) continue;
-      drawPlatform(ctx, plat, s.zone);
+      if (plat.y > cam.y + CANVAS_H + 40 || plat.y < cam.y - 40) continue;
+      if (plat.x + plat.w < cam.x - 20 || plat.x > cam.x + CANVAS_W + 20) continue;
+      drawPlatform(ctx, plat, frame);
     }
 
-    // Draw checkpoints
-    for (const cy of CHECKPOINTS) {
-      const screenY = cy - camY;
-      if (Math.abs(screenY) < CANVAS_H + 60) {
-        ctx.save();
-        ctx.fillStyle = "#FFD700";
-        ctx.font = "bold 14px sans-serif";
-        ctx.textAlign = "right";
-        ctx.fillText("★ checkpoint", CANVAS_W - 8, cy - 5);
-        ctx.strokeStyle = "#FFD70066";
-        ctx.lineWidth = 1;
-        ctx.setLineDash([4, 4]);
-        ctx.beginPath();
-        ctx.moveTo(0, cy);
-        ctx.lineTo(CANVAS_W, cy);
-        ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.restore();
-      }
+    // Checkpoint flags
+    for (let ci = 0; ci < CHECKPOINTS.length; ci++) {
+      const cy = CHECKPOINTS[ci];
+      if (cy < cam.y - 60 || cy > cam.y + CANVAS_H + 20) continue;
+      drawCheckpointFlag(ctx, cy, s.checkpointY);
+    }
+
+    // Other players (ghosted)
+    for (const other of s.otherPlayers) {
+      const oy = WORLD_H - other.height * 10;
+      const ox = WORLD_W / 2; // approximate, we don't track x of others
+      if (oy < cam.y - 80 || oy > cam.y + CANVAS_H + 40) continue;
+      ctx.globalAlpha = 0.45;
+      drawCharacter(ctx, character, ox, oy, PW, PH, other.name, false);
+      ctx.globalAlpha = 1;
     }
 
     // Draw player
-    const pScreenY = p.worldY - camY;
-    const pColor = s.energy > 20 ? "#7F77DD" : "#E24B4A";
-    ctx.fillStyle = pColor;
-    ctx.beginPath();
-    (ctx as any).roundRect?.(p.x, pScreenY, p.w, p.h, 4) ||
-      ctx.rect(p.x, pScreenY, p.w, p.h);
-    ctx.fill();
-    // Head
-    ctx.fillStyle = "#AFA9EC";
-    ctx.beginPath();
-    ctx.arc(p.x + p.w / 2, pScreenY + 6, 6, 0, Math.PI * 2);
-    ctx.fill();
-    // Eyes
-    ctx.fillStyle = "#26215C";
-    ctx.fillRect(p.x + p.w / 2 - 4, pScreenY + 4, 3, 3);
-    ctx.fillRect(p.x + p.w / 2 + 1, pScreenY + 4, 3, 3);
-    // Name tag
-    ctx.fillStyle = "#ffffffcc";
-    ctx.font = "10px sans-serif";
-    ctx.textAlign = "center";
-    ctx.fillText(playerName.slice(0, 10), p.x + p.w / 2, pScreenY - 5);
+    drawCharacter(ctx, character, p.x, p.worldY, PW, PH, playerName, p.facingLeft);
+
+    // Teacher sparkle
+    if (isTeacher) {
+      ctx.strokeStyle = "#FFD700";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(p.x + PW / 2, p.worldY + PH / 2, PW * 0.8 + Math.sin(frame * 0.1) * 3, 0, Math.PI * 2);
+      ctx.stroke();
+    }
 
     ctx.restore();
 
-    // No-energy overlay
-    if (s.energy <= 0) {
-      ctx.fillStyle = "rgba(226,75,74,0.15)";
+    // Low energy overlay
+    if (!isTeacher && s.energy <= 0) {
+      ctx.fillStyle = "rgba(226,75,74,0.13)";
       ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
-      ctx.fillStyle = "#F09595";
-      ctx.font = "500 13px sans-serif";
+      ctx.fillStyle = "#E24B4A";
+      ctx.font = "500 14px sans-serif";
       ctx.textAlign = "center";
-      ctx.fillText("Sin energía — presiona Q para responder", CANVAS_W / 2, CANVAS_H / 2);
+      ctx.fillText("Sin energía — presiona Q para responder una pregunta", CANVAS_W / 2, CANVAS_H - 24);
+    }
+
+    // Zone transition text (fades in/out)
+    // (omitted for brevity — zone shown in HUD)
+  }
+
+  function drawParallaxBg(ctx: CanvasRenderingContext2D, cam: Cam, midY: number, frame: number) {
+    const zi = getZone(midY);
+
+    if (zi === 0) {
+      // Beach: distant water horizon
+      const wy = WORLD_H - cam.y - 60;
+      if (wy > 0 && wy < CANVAS_H) {
+        ctx.fillStyle = "#4a90d9";
+        ctx.fillRect(0, wy, CANVAS_W, CANVAS_H - wy);
+        // Wave shimmer
+        ctx.fillStyle = "rgba(255,255,255,0.15)";
+        for (let wx = 0; wx < CANVAS_W; wx += 60) {
+          const waveY = wy + 10 + Math.sin((wx + frame) * 0.05) * 4;
+          ctx.fillRect(wx, waveY, 40, 3);
+        }
+      }
+      // Distant palm silhouettes
+      ctx.fillStyle = "rgba(30,60,20,0.25)";
+      for (let px = 0; px < CANVAS_W; px += 280) {
+        const py = WORLD_H - cam.y - 80 - ((px * 13) % 40);
+        if (py < CANVAS_H) {
+          ctx.fillRect(px + 40, py, 8, 50);
+          ctx.beginPath();
+          ctx.ellipse(px + 44, py, 30, 14, -0.3, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+
+    if (zi === 1) {
+      // Meadow: rolling hills silhouette
+      ctx.fillStyle = "rgba(50,100,40,0.2)";
+      ctx.beginPath();
+      ctx.moveTo(0, CANVAS_H);
+      for (let hx = 0; hx <= CANVAS_W; hx += 20) {
+        const hy = CANVAS_H * 0.7 + Math.sin((hx + cam.x * 0.3) * 0.007) * 60;
+        ctx.lineTo(hx, hy);
+      }
+      ctx.lineTo(CANVAS_W, CANVAS_H);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    if (zi === 2) {
+      // Mountain: distant peaks
+      ctx.fillStyle = "rgba(100,90,120,0.25)";
+      ctx.beginPath();
+      ctx.moveTo(0, CANVAS_H);
+      const peaks = [80, 200, 380, 520, 680, 820, 960];
+      const heights = [0.45, 0.25, 0.35, 0.2, 0.3, 0.4, 0.28];
+      for (let i = 0; i < peaks.length; i++) {
+        const px = peaks[i] - (cam.x * 0.15) % 200;
+        ctx.lineTo(px - 80, CANVAS_H * 0.85);
+        ctx.lineTo(px, CANVAS_H * heights[i]);
+        ctx.lineTo(px + 80, CANVAS_H * 0.85);
+      }
+      ctx.lineTo(CANVAS_W, CANVAS_H);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    if (zi >= 3) {
+      // Sky/space: aurora / nebula streaks
+      const alpha = Math.min(1, (zi - 2) * 0.4) * 0.12;
+      ctx.fillStyle = `rgba(100,0,200,${alpha})`;
+      for (let ai = 0; ai < 3; ai++) {
+        const ax = ((ai * 300 + cam.x * 0.05) % CANVAS_W);
+        ctx.beginPath();
+        ctx.ellipse(ax, CANVAS_H * 0.3 + ai * 80, 180, 30, 0.3, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
   }
 
-  function drawPlatform(ctx: CanvasRenderingContext2D, plat: Platform, currentZone: number) {
+  function drawPlatform(ctx: CanvasRenderingContext2D, plat: Platform, frame: number) {
     const z = ZONES[plat.zone];
-    const col = z.platformColors[plat.type === "narrow" ? 2 : plat.type === "wide" ? 0 : 1];
-    ctx.fillStyle = col;
+    const col = z.platColors[plat.type === "narrow" ? 1 : plat.type === "wide" ? 2 : 0];
 
     if (plat.zone === 0) {
-      // Beach: sandy with grain texture
-      ctx.fillRect(plat.x, plat.y, plat.w, plat.h);
-      ctx.fillStyle = "rgba(255,220,100,0.4)";
-      for (let i = 0; i < plat.w; i += 8) {
-        ctx.fillRect(plat.x + i, plat.y + 2, 4, 3);
+      // Beach: sandy with grain
+      ctx.fillStyle = col;
+      ctx.beginPath();
+      ctx.roundRect?.(plat.x, plat.y, plat.w, plat.h, 3);
+      ctx.fill();
+      ctx.fillStyle = "#f5deb3";
+      ctx.fillRect(plat.x + 2, plat.y, plat.w - 4, 5);
+      // Grain dots
+      ctx.fillStyle = "rgba(160,120,50,0.3)";
+      for (let gx = plat.x + 6; gx < plat.x + plat.w - 4; gx += 10) {
+        ctx.beginPath();
+        ctx.arc(gx, plat.y + 8, 1.5, 0, Math.PI * 2);
+        ctx.fill();
       }
-      // Top edge
-      ctx.fillStyle = "#e8c878";
-      ctx.fillRect(plat.x, plat.y, plat.w, 4);
+
     } else if (plat.zone === 1) {
-      // Meadow: green with grass top
-      ctx.fillRect(plat.x, plat.y, plat.w, plat.h);
+      // Meadow: dirt body, thick grass top
+      ctx.fillStyle = "#8B6914";
+      ctx.fillRect(plat.x, plat.y + 6, plat.w, plat.h - 6);
       ctx.fillStyle = "#5a8a3c";
-      ctx.fillRect(plat.x, plat.y, plat.w, 5);
+      ctx.fillRect(plat.x, plat.y, plat.w, 8);
       // Grass blades
       ctx.fillStyle = "#4a7a2c";
-      for (let i = 2; i < plat.w - 4; i += 6) {
-        ctx.fillRect(plat.x + i, plat.y - 4, 2, 5);
+      for (let gx = plat.x + 3; gx < plat.x + plat.w - 2; gx += 7) {
+        ctx.fillRect(gx, plat.y - 5, 2, 6);
+        ctx.fillRect(gx + 3, plat.y - 4, 2, 5);
       }
+      // Flowers (on wide platforms)
+      if (plat.w > 120) {
+        for (let fx = plat.x + 20; fx < plat.x + plat.w - 20; fx += 40) {
+          ctx.fillStyle = "#FFD700";
+          ctx.beginPath();
+          ctx.arc(fx, plat.y - 8, 3, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
     } else if (plat.zone === 2) {
-      // Mountain: rocky gray
-      ctx.fillStyle = "#777";
-      ctx.fillRect(plat.x, plat.y, plat.w, plat.h);
-      ctx.fillStyle = "#999";
-      ctx.fillRect(plat.x, plat.y, plat.w, 3);
-      // Snow caps on wide ones
-      if (plat.w > 80) {
-        ctx.fillStyle = "#eeeeff";
-        ctx.fillRect(plat.x + plat.w * 0.2, plat.y, plat.w * 0.6, 4);
+      // Mountain: rocky with crack lines
+      ctx.fillStyle = col;
+      ctx.beginPath();
+      ctx.roundRect?.(plat.x, plat.y, plat.w, plat.h, 2);
+      ctx.fill();
+      ctx.fillStyle = "#aaaaaa";
+      ctx.fillRect(plat.x + 2, plat.y, plat.w - 4, 4);
+      // Snow cap on wide
+      if (plat.w > 90) {
+        ctx.fillStyle = "rgba(230,240,255,0.9)";
+        ctx.beginPath();
+        ctx.ellipse(plat.x + plat.w / 2, plat.y + 1, plat.w * 0.32, 5, 0, 0, Math.PI * 2);
+        ctx.fill();
       }
+      // Crack
+      ctx.strokeStyle = "rgba(80,80,80,0.4)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(plat.x + plat.w * 0.4, plat.y + 3);
+      ctx.lineTo(plat.x + plat.w * 0.45, plat.y + plat.h);
+      ctx.stroke();
+
     } else if (plat.zone === 3) {
-      // Sky: white clouds
-      ctx.fillStyle = "rgba(255,255,255,0.9)";
+      // Sky: fluffy cloud
+      const cx = plat.x + plat.w / 2;
+      const cy = plat.y + plat.h / 2;
+      ctx.fillStyle = "rgba(255,255,255,0.92)";
       ctx.beginPath();
-      ctx.ellipse(plat.x + plat.w / 2, plat.y + plat.h / 2, plat.w / 2, plat.h * 0.8, 0, 0, Math.PI * 2);
+      ctx.ellipse(cx, cy + 2, plat.w / 2, plat.h * 0.7, 0, 0, Math.PI * 2);
       ctx.fill();
-      ctx.fillStyle = "rgba(220,235,255,0.6)";
+      ctx.fillStyle = "rgba(255,255,255,0.7)";
       ctx.beginPath();
-      ctx.ellipse(plat.x + plat.w * 0.3, plat.y + plat.h * 0.3, plat.w * 0.25, plat.h * 0.5, 0, 0, Math.PI * 2);
+      ctx.ellipse(cx - plat.w * 0.22, cy, plat.w * 0.24, plat.h * 0.55, 0, 0, Math.PI * 2);
       ctx.fill();
+      ctx.beginPath();
+      ctx.ellipse(cx + plat.w * 0.22, cy - 1, plat.w * 0.22, plat.h * 0.48, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // Soft shadow below
+      ctx.fillStyle = "rgba(180,200,240,0.3)";
+      ctx.beginPath();
+      ctx.ellipse(cx, cy + plat.h * 0.5, plat.w * 0.4, 4, 0, 0, Math.PI * 2);
+      ctx.fill();
+
     } else {
-      // Space: asteroid / metallic rock
-      ctx.fillStyle = "#3a3a7a";
+      // Space: metallic asteroid
+      ctx.fillStyle = col;
       ctx.beginPath();
-      (ctx as any).roundRect?.(plat.x, plat.y, plat.w, plat.h, 6) ||
-        ctx.rect(plat.x, plat.y, plat.w, plat.h);
+      ctx.roundRect?.(plat.x, plat.y, plat.w, plat.h, 5);
       ctx.fill();
-      ctx.fillStyle = "#5a5aaa";
-      ctx.fillRect(plat.x + 3, plat.y + 2, plat.w - 6, 3);
+      // Shimmer
+      ctx.fillStyle = "rgba(150,150,255,0.3)";
+      ctx.fillRect(plat.x + 4, plat.y + 2, plat.w - 8, 3);
+      // Crater
+      ctx.fillStyle = "rgba(20,20,60,0.35)";
+      ctx.beginPath();
+      ctx.arc(plat.x + plat.w * 0.3, plat.y + plat.h / 2, 4, 0, Math.PI * 2);
+      ctx.fill();
     }
   }
 
-  // ── keyboard ──────────────────────────────────────────────────────────────
+  function drawCheckpointFlag(ctx: CanvasRenderingContext2D, cy: number, activeCheckpoint: number) {
+    const reached = cy >= activeCheckpoint - 10;
+    const flagColor = reached ? "#5DCAA5" : "#FFD700";
+    ctx.strokeStyle = reached ? "#5DCAA5" : "#FFD70088";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([6, 6]);
+    ctx.beginPath();
+    ctx.moveTo(0, cy - PH);
+    ctx.lineTo(WORLD_W, cy - PH);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // Flag icon at left edge
+    ctx.fillStyle = flagColor;
+    ctx.fillRect(30, cy - PH - 14, 3, 14);
+    ctx.beginPath();
+    ctx.moveTo(33, cy - PH - 14);
+    ctx.lineTo(46, cy - PH - 8);
+    ctx.lineTo(33, cy - PH - 2);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = reached ? "#085041" : "#633806";
+    ctx.font = "10px sans-serif";
+    ctx.textAlign = "left";
+    ctx.fillText(reached ? "★ checkpoint" : "checkpoint", 50, cy - PH - 5);
+  }
+
+  // Keyboard
   useEffect(() => {
-    function onDown(e: KeyboardEvent) {
+    const onDown = (e: KeyboardEvent) => {
       stateRef.current.keys[e.key] = true;
       if (e.key === " " || e.key === "ArrowUp") e.preventDefault();
-      if (e.key === "q" || e.key === "Q") openQuestion();
+      if ((e.key === "q" || e.key === "Q") && !stateRef.current.questionOpen) openQuestion();
       if (e.key === "r" || e.key === "R") handleReturnToCheckpoint();
-    }
-    function onUp(e: KeyboardEvent) { stateRef.current.keys[e.key] = false; }
+    };
+    const onUp = (e: KeyboardEvent) => { stateRef.current.keys[e.key] = false; };
     window.addEventListener("keydown", onDown);
     window.addEventListener("keyup", onUp);
     return () => { window.removeEventListener("keydown", onDown); window.removeEventListener("keyup", onUp); };
   }, [openQuestion]);
 
-  // ── render ────────────────────────────────────────────────────────────────
-  const pct = energy;
+  const pct = Math.min(100, energy);
   const energyColor = pct > 50 ? "#5DCAA5" : pct > 20 ? "#EF9F27" : "#E24B4A";
   const accuracy = stats.total > 0 ? Math.round((stats.correct / stats.total) * 100) : 0;
 
   return (
-    <div style={{ display: "flex", gap: 16, alignItems: "flex-start", fontFamily: "var(--font-sans)" }}>
+    <div style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
       {/* Game column */}
       <div style={{ flex: "0 0 auto" }}>
         {/* HUD */}
-        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, fontSize: 12 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, fontSize: 12 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ color: "var(--color-text-secondary)" }}>Energía</span>
-            <div style={{ width: 100, height: 6, background: "#ddd", borderRadius: 3, overflow: "hidden" }}>
-              <div style={{ width: `${pct}%`, height: "100%", background: energyColor, transition: "width .3s, background .3s" }} />
-            </div>
-            <span style={{ fontWeight: 500, color: "var(--color-text-primary)", minWidth: 32 }}>{pct}%</span>
+            {isTeacher ? (
+              <span style={{ fontWeight: 500, color: "#FFD700", fontSize: 12 }}>Modo Profesor — energía ilimitada</span>
+            ) : (
+              <>
+                <span style={{ color: "var(--color-text-secondary)" }}>Energía</span>
+                <div style={{ width: 120, height: 7, background: "var(--color-background-secondary)", borderRadius: 4, overflow: "hidden" }}>
+                  <div style={{ width: `${pct}%`, height: "100%", background: energyColor, transition: "width .3s,background .3s", borderRadius: 4 }} />
+                </div>
+                <span style={{ fontWeight: 500, minWidth: 32, color: "var(--color-text-primary)" }}>{pct}%</span>
+              </>
+            )}
           </div>
-          <div style={{ color: "var(--color-text-secondary)" }}>
-            <span style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>{ZONES[zone]?.name}</span>
-            {" · "}
-            <span style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>{height}m</span>
+          <div style={{ display: "flex", gap: 12, fontSize: 12, color: "var(--color-text-secondary)" }}>
+            <span><strong style={{ color: "var(--color-text-primary)" }}>{ZONES[zone]?.name}</strong></span>
+            <span><strong style={{ color: "var(--color-text-primary)" }}>{height}m</strong> altura</span>
           </div>
         </div>
 
-        {/* Question modal */}
+        {/* Question panel */}
         {questionModal && (
           <div style={{
             background: "var(--color-background-primary)",
@@ -445,31 +610,31 @@ export default function GameCanvas({
             marginBottom: 8,
             width: CANVAS_W,
           }}>
-            <div style={{ fontSize: 11, color: "var(--color-text-tertiary)", marginBottom: 6, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+            <div style={{ fontSize: 10, color: "var(--color-text-tertiary)", marginBottom: 6, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.06em" }}>
               {questionModal.article}
             </div>
             <div style={{ fontSize: 13, color: "var(--color-text-primary)", marginBottom: 12, lineHeight: 1.6 }}>
               {questionModal.q}
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7 }}>
               {questionModal.opts.map((opt, i) => {
                 let bg = "var(--color-background-primary)";
                 let border = "var(--color-border-secondary)";
-                let color = "var(--color-text-secondary)";
+                let col = "var(--color-text-secondary)";
                 if (answered !== null) {
-                  if (i === questionModal.ans) { bg = "#E1F5EE"; border = "#5DCAA5"; color = "#085041"; }
-                  else if (i === selectedIdx && answered === "wrong") { bg = "#FCEBEB"; border = "#F09595"; color = "#791F1F"; }
+                  if (i === questionModal.ans) { bg = "#E1F5EE"; border = "#5DCAA5"; col = "#085041"; }
+                  else if (i === selectedIdx && answered === "wrong") { bg = "#FCEBEB"; border = "#F09595"; col = "#791F1F"; }
                 }
                 return (
                   <button key={i} onClick={() => handleAnswer(i)} disabled={answered !== null}
-                    style={{ padding: "8px 10px", fontSize: 12, border: `0.5px solid ${border}`, borderRadius: "var(--border-radius-md)", background: bg, cursor: answered ? "default" : "pointer", color, textAlign: "left", lineHeight: 1.4 }}>
+                    style={{ padding: "8px 10px", fontSize: 12, border: `0.5px solid ${border}`, borderRadius: "var(--border-radius-md)", background: bg, cursor: answered ? "default" : "pointer", color: col, textAlign: "left", lineHeight: 1.45, transition: "all .12s" }}>
                     {opt}
                   </button>
                 );
               })}
             </div>
             {answered && (
-              <div style={{ marginTop: 10, fontSize: 12, color: answered === "correct" ? "#085041" : "#791F1F", background: answered === "correct" ? "#E1F5EE" : "#FCEBEB", borderRadius: "var(--border-radius-md)", padding: "6px 10px", lineHeight: 1.5 }}>
+              <div style={{ marginTop: 10, fontSize: 12, padding: "6px 10px", borderRadius: "var(--border-radius-md)", background: answered === "correct" ? "#E1F5EE" : "#FCEBEB", color: answered === "correct" ? "#085041" : "#791F1F", lineHeight: 1.5 }}>
                 {explanation}
               </div>
             )}
@@ -479,7 +644,6 @@ export default function GameCanvas({
         <canvas ref={canvasRef} width={CANVAS_W} height={CANVAS_H}
           style={{ display: "block", borderRadius: "var(--border-radius-lg)", border: "0.5px solid var(--color-border-tertiary)" }} />
 
-        {/* Controls */}
         <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
           <button onClick={openQuestion}
             style={{ flex: 1, padding: "8px 0", fontSize: 12, border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "var(--color-background-primary)", cursor: "pointer", color: "var(--color-text-primary)" }}>
@@ -487,51 +651,55 @@ export default function GameCanvas({
           </button>
           <button onClick={handleReturnToCheckpoint}
             style={{ flex: 1, padding: "8px 0", fontSize: 12, border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "var(--color-background-primary)", cursor: "pointer", color: "var(--color-text-secondary)" }}>
-            R — Volver al checkpoint ★
+            R — Volver al checkpoint
           </button>
         </div>
-        <div style={{ fontSize: 11, color: "var(--color-text-tertiary)", textAlign: "center", marginTop: 4 }}>
-          ← A/D mover · W/Espacio saltar · Q pregunta · R checkpoint
+        <div style={{ fontSize: 10, color: "var(--color-text-tertiary)", textAlign: "center", marginTop: 4 }}>
+          A/D o ← → mover · W o Espacio saltar · Q pregunta · R checkpoint
         </div>
       </div>
 
       {/* Sidebar */}
-      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
         {/* Stats */}
-        <div style={{ background: "var(--color-background-primary)", border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-lg)", padding: "1rem" }}>
-          <div style={{ fontSize: 12, fontWeight: 500, color: "var(--color-text-secondary)", marginBottom: 10 }}>Tus estadísticas</div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-            {[
-              { label: "Correctas", val: stats.correct, color: "#085041", bg: "#E1F5EE" },
-              { label: "Total", val: stats.total, color: "var(--color-text-primary)", bg: "var(--color-background-secondary)" },
-              { label: "Precisión", val: `${accuracy}%`, color: accuracy >= 70 ? "#085041" : accuracy >= 40 ? "#633806" : "#791F1F", bg: accuracy >= 70 ? "#E1F5EE" : accuracy >= 40 ? "#FAEEDA" : "#FCEBEB" },
-              { label: "Altura", val: `${height}m`, color: "#3C3489", bg: "#EEEDFE" },
-            ].map(s => (
-              <div key={s.label} style={{ background: s.bg, borderRadius: "var(--border-radius-md)", padding: "8px 10px" }}>
-                <div style={{ fontSize: 11, color: "var(--color-text-tertiary)", marginBottom: 2 }}>{s.label}</div>
-                <div style={{ fontSize: 20, fontWeight: 500, color: s.color }}>{s.val}</div>
-              </div>
-            ))}
+        {!isTeacher && (
+          <div style={{ background: "var(--color-background-primary)", border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-lg)", padding: "1rem" }}>
+            <div style={{ fontSize: 11, fontWeight: 500, color: "var(--color-text-secondary)", marginBottom: 8 }}>Tus estadísticas</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+              {[
+                { label: "Correctas", val: stats.correct, c: "#085041", bg: "#E1F5EE" },
+                { label: "Total resp.", val: stats.total, c: "var(--color-text-primary)", bg: "var(--color-background-secondary)" },
+                { label: "Precisión", val: `${accuracy}%`, c: accuracy >= 70 ? "#085041" : accuracy >= 40 ? "#633806" : "#791F1F", bg: accuracy >= 70 ? "#E1F5EE" : accuracy >= 40 ? "#FAEEDA" : "#FCEBEB" },
+                { label: "Altura", val: `${height}m`, c: "#3C3489", bg: "#EEEDFE" },
+              ].map(s => (
+                <div key={s.label} style={{ background: s.bg, borderRadius: "var(--border-radius-md)", padding: "8px 10px" }}>
+                  <div style={{ fontSize: 10, color: "var(--color-text-tertiary)", marginBottom: 2 }}>{s.label}</div>
+                  <div style={{ fontSize: 20, fontWeight: 500, color: s.c }}>{s.val}</div>
+                </div>
+              ))}
+            </div>
           </div>
-        </div>
+        )}
 
         {/* Leaderboard */}
         <div style={{ background: "var(--color-background-primary)", border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-lg)", padding: "1rem" }}>
-          <div style={{ fontSize: 12, fontWeight: 500, color: "var(--color-text-secondary)", marginBottom: 10 }}>Tabla de posiciones</div>
+          <div style={{ fontSize: 11, fontWeight: 500, color: "var(--color-text-secondary)", marginBottom: 8 }}>Tabla de posiciones</div>
           {leaderboard.length === 0 && <div style={{ fontSize: 12, color: "var(--color-text-tertiary)" }}>Esperando jugadores...</div>}
           {leaderboard.map((row, i) => (
             <div key={row.id} style={{
               display: "flex", justifyContent: "space-between", alignItems: "center",
-              padding: "5px 0", borderBottom: i < leaderboard.length - 1 ? "0.5px solid var(--color-border-tertiary)" : "none",
-              fontSize: 12,
+              padding: "5px 0", borderBottom: i < leaderboard.length - 1 ? "0.5px solid var(--color-border-tertiary)" : "none", fontSize: 12,
             }}>
-              <span style={{ color: i === 0 ? "#633806" : "var(--color-text-secondary)", fontWeight: i === 0 ? 500 : 400 }}>
-                {i + 1}. {row.name} {row.id === sessionId ? "(tú)" : ""}
-              </span>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ color: i === 0 ? "#BA7517" : i === 1 ? "#5F5E5A" : i === 2 ? "#993C1D" : "var(--color-text-tertiary)", fontWeight: 500, minWidth: 18 }}>{i + 1}.</span>
+                <span style={{ color: row.id === sessionId ? "#3C3489" : "var(--color-text-primary)", fontWeight: row.id === sessionId ? 500 : 400 }}>
+                  {row.name}{row.id === sessionId ? " ★" : ""}
+                </span>
+              </div>
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <span style={{ color: "var(--color-text-tertiary)" }}>{ZONES[Math.min(row.zone, 4)]?.name}</span>
+                <span style={{ fontSize: 10, color: "var(--color-text-tertiary)" }}>{ZONES[Math.min(row.zone ?? 0, 4)]?.name}</span>
                 <span style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>{row.height}m</span>
-                <span style={{ color: "#085041", fontSize: 11 }}>
+                <span style={{ fontSize: 10, color: "#085041" }}>
                   {row.total > 0 ? `${Math.round((row.correct / row.total) * 100)}%` : "—"}
                 </span>
               </div>
@@ -539,21 +707,18 @@ export default function GameCanvas({
           ))}
         </div>
 
-        {/* Zone progress */}
+        {/* Zone map */}
         <div style={{ background: "var(--color-background-primary)", border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-lg)", padding: "1rem" }}>
-          <div style={{ fontSize: 12, fontWeight: 500, color: "var(--color-text-secondary)", marginBottom: 10 }}>Zonas</div>
-          {ZONES.slice().reverse().map((z, i) => {
+          <div style={{ fontSize: 11, fontWeight: 500, color: "var(--color-text-secondary)", marginBottom: 8 }}>Zonas</div>
+          {[...ZONES].reverse().map((z, i) => {
             const zi = ZONES.length - 1 - i;
             const active = zi === zone;
             const passed = zi > zone;
             return (
-              <div key={z.name} style={{
-                display: "flex", alignItems: "center", gap: 8, padding: "4px 0",
-                fontSize: 12, opacity: zi < zone ? 0.4 : 1,
-              }}>
-                <div style={{ width: 8, height: 8, borderRadius: "50%", background: active ? "#7F77DD" : passed ? "#5DCAA5" : "var(--color-border-tertiary)", flexShrink: 0 }} />
+              <div key={z.name} style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0", fontSize: 12, opacity: zi < zone ? 0.35 : 1 }}>
+                <div style={{ width: 7, height: 7, borderRadius: "50%", background: active ? "#7F77DD" : passed ? "#5DCAA5" : "var(--color-border-secondary)", flexShrink: 0 }} />
                 <span style={{ color: active ? "var(--color-text-primary)" : "var(--color-text-secondary)", fontWeight: active ? 500 : 400 }}>{z.name}</span>
-                {active && <span style={{ fontSize: 10, color: "#534AB7", background: "#EEEDFE", padding: "1px 6px", borderRadius: 8 }}>actual</span>}
+                {active && <span style={{ fontSize: 9, background: "#EEEDFE", color: "#534AB7", padding: "1px 6px", borderRadius: 8 }}>actual</span>}
                 {passed && <span style={{ fontSize: 10, color: "#085041" }}>✓</span>}
               </div>
             );
