@@ -574,29 +574,39 @@ export default function GameCanvas({
   const pct = Math.min(100, energy);
   const energyColor = pct > 50 ? "#5DCAA5" : pct > 20 ? "#EF9F27" : "#E24B4A";
   const accuracy = stats.total > 0 ? Math.round((stats.correct / stats.total) * 100) : 0;
+  const maxHeight = Math.round(WORLD_H / 10);
+  const heightPct = Math.min(100, (height / maxHeight) * 100);
+  const zoneColors = ["#f0d090","#7caf52","#888","#d6ecff","#3a3a7a"];
+  const zoneEmoji = ["🏖️","🌿","⛰️","☁️","🚀"];
 
   return (
     <div style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
       {/* Game column */}
       <div style={{ flex: "0 0 auto" }}>
         {/* HUD */}
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, fontSize: 12 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, gap: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
             {isTeacher ? (
-              <span style={{ fontWeight: 500, color: "#FFD700", fontSize: 12 }}>Modo Profesor — energía ilimitada</span>
+              <span style={{ fontWeight: 500, color: "#FFD700" }}>Profesor — energía ilimitada</span>
             ) : (
               <>
                 <span style={{ color: "var(--color-text-secondary)" }}>Energía</span>
-                <div style={{ width: 120, height: 7, background: "var(--color-background-secondary)", borderRadius: 4, overflow: "hidden" }}>
+                <div style={{ width: 110, height: 7, background: "var(--color-background-secondary)", borderRadius: 4, overflow: "hidden" }}>
                   <div style={{ width: `${pct}%`, height: "100%", background: energyColor, transition: "width .3s,background .3s", borderRadius: 4 }} />
                 </div>
-                <span style={{ fontWeight: 500, minWidth: 32, color: "var(--color-text-primary)" }}>{pct}%</span>
+                <span style={{ fontWeight: 500, minWidth: 30, color: "var(--color-text-primary)" }}>{pct}%</span>
               </>
             )}
           </div>
-          <div style={{ display: "flex", gap: 12, fontSize: 12, color: "var(--color-text-secondary)" }}>
-            <span><strong style={{ color: "var(--color-text-primary)" }}>{ZONES[zone]?.name}</strong></span>
-            <span><strong style={{ color: "var(--color-text-primary)" }}>{height}m</strong> altura</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 5, background: "var(--color-background-secondary)", borderRadius: "var(--border-radius-md)", padding: "4px 10px" }}>
+              <div style={{ width: 8, height: 8, borderRadius: "50%", background: zoneColors[zone], flexShrink: 0 }} />
+              <span style={{ fontSize: 12, color: "var(--color-text-secondary)" }}>{ZONES[zone]?.name}</span>
+            </div>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 3 }}>
+              <span style={{ fontSize: 20, fontWeight: 500, color: "var(--color-text-primary)", lineHeight: 1 }}>{height}</span>
+              <span style={{ fontSize: 11, color: "var(--color-text-tertiary)" }}>m / {maxHeight}m</span>
+            </div>
           </div>
         </div>
 
@@ -661,20 +671,111 @@ export default function GameCanvas({
 
       {/* Sidebar */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
+
+        {/* ── HEIGHT TOWER ── */}
+        <div style={{ background: "var(--color-background-primary)", border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-lg)", padding: "1rem" }}>
+          <div style={{ fontSize: 11, fontWeight: 500, color: "var(--color-text-secondary)", marginBottom: 10 }}>Altura actual</div>
+          <div style={{ display: "flex", gap: 10, alignItems: "stretch" }}>
+
+            {/* Vertical tower bar */}
+            <div style={{ position: "relative", width: 18, flexShrink: 0 }}>
+              {/* Zone segments (bottom to top) */}
+              <div style={{ position: "absolute", inset: 0, borderRadius: 6, overflow: "hidden", display: "flex", flexDirection: "column-reverse" }}>
+                {ZONES.map((z, i) => (
+                  <div key={z.name} style={{ flex: 1, background: zoneColors[i], opacity: i < zone ? 1 : i === zone ? 0.85 : 0.2 }} />
+                ))}
+              </div>
+              {/* Player dot */}
+              <div style={{
+                position: "absolute",
+                left: "50%", transform: "translateX(-50%)",
+                bottom: `calc(${heightPct}% - 5px)`,
+                width: 12, height: 12,
+                borderRadius: "50%",
+                background: "#7F77DD",
+                border: "2px solid white",
+                boxShadow: "0 0 0 1px #534AB7",
+                transition: "bottom .4s ease",
+                zIndex: 2,
+              }} />
+              {/* Leaderboard dots for other players */}
+              {leaderboard.filter(r => r.id !== sessionId).map(r => {
+                const rPct = Math.min(100, (r.height / maxHeight) * 100);
+                return (
+                  <div key={r.id} style={{
+                    position: "absolute",
+                    left: "50%", transform: "translateX(-50%)",
+                    bottom: `calc(${rPct}% - 4px)`,
+                    width: 8, height: 8,
+                    borderRadius: "50%",
+                    background: "#E24B4A",
+                    opacity: 0.7,
+                    transition: "bottom .8s ease",
+                    zIndex: 1,
+                  }} />
+                );
+              })}
+            </div>
+
+            {/* Zone labels + checkpoint markers */}
+            <div style={{ flex: 1, display: "flex", flexDirection: "column-reverse", gap: 0 }}>
+              {ZONES.map((z, i) => {
+                const active = i === zone;
+                const passed = i > zone;
+                return (
+                  <div key={z.name} style={{
+                    flex: 1, display: "flex", alignItems: "center", gap: 6,
+                    borderLeft: `2px solid ${active ? zoneColors[i] : "var(--color-border-tertiary)"}`,
+                    paddingLeft: 8,
+                    opacity: i < zone ? 0.35 : 1,
+                    minHeight: 28,
+                  }}>
+                    <span style={{ fontSize: 13 }}>{zoneEmoji[i]}</span>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 11, fontWeight: active ? 500 : 400, color: active ? "var(--color-text-primary)" : "var(--color-text-secondary)" }}>
+                        {z.name}
+                        {passed && <span style={{ marginLeft: 5, color: "#5DCAA5", fontSize: 10 }}>✓</span>}
+                        {active && <span style={{ marginLeft: 5, fontSize: 9, background: "#EEEDFE", color: "#534AB7", padding: "1px 5px", borderRadius: 6 }}>aquí</span>}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+          </div>
+
+          {/* Height numbers */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginTop: 10 }}>
+            <div>
+              <span style={{ fontSize: 26, fontWeight: 500, color: "var(--color-text-primary)", lineHeight: 1 }}>{height}</span>
+              <span style={{ fontSize: 11, color: "var(--color-text-tertiary)", marginLeft: 3 }}>m</span>
+            </div>
+            <span style={{ fontSize: 11, color: "var(--color-text-tertiary)" }}>de {maxHeight}m</span>
+          </div>
+
+          {/* Progress bar */}
+          <div style={{ marginTop: 6, height: 4, background: "var(--color-background-secondary)", borderRadius: 2, overflow: "hidden" }}>
+            <div style={{ width: `${heightPct}%`, height: "100%", background: zoneColors[zone], transition: "width .4s", borderRadius: 2 }} />
+          </div>
+          <div style={{ fontSize: 10, color: "var(--color-text-tertiary)", marginTop: 3, textAlign: "right" }}>
+            {heightPct.toFixed(1)}% completado
+          </div>
+        </div>
+
         {/* Stats */}
         {!isTeacher && (
           <div style={{ background: "var(--color-background-primary)", border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-lg)", padding: "1rem" }}>
-            <div style={{ fontSize: 11, fontWeight: 500, color: "var(--color-text-secondary)", marginBottom: 8 }}>Tus estadísticas</div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            <div style={{ fontSize: 11, fontWeight: 500, color: "var(--color-text-secondary)", marginBottom: 8 }}>Estadísticas</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
               {[
                 { label: "Correctas", val: stats.correct, c: "#085041", bg: "#E1F5EE" },
-                { label: "Total resp.", val: stats.total, c: "var(--color-text-primary)", bg: "var(--color-background-secondary)" },
+                { label: "Total", val: stats.total, c: "var(--color-text-primary)", bg: "var(--color-background-secondary)" },
                 { label: "Precisión", val: `${accuracy}%`, c: accuracy >= 70 ? "#085041" : accuracy >= 40 ? "#633806" : "#791F1F", bg: accuracy >= 70 ? "#E1F5EE" : accuracy >= 40 ? "#FAEEDA" : "#FCEBEB" },
-                { label: "Altura", val: `${height}m`, c: "#3C3489", bg: "#EEEDFE" },
               ].map(s => (
                 <div key={s.label} style={{ background: s.bg, borderRadius: "var(--border-radius-md)", padding: "8px 10px" }}>
                   <div style={{ fontSize: 10, color: "var(--color-text-tertiary)", marginBottom: 2 }}>{s.label}</div>
-                  <div style={{ fontSize: 20, fontWeight: 500, color: s.c }}>{s.val}</div>
+                  <div style={{ fontSize: 18, fontWeight: 500, color: s.c }}>{s.val}</div>
                 </div>
               ))}
             </div>
@@ -685,45 +786,36 @@ export default function GameCanvas({
         <div style={{ background: "var(--color-background-primary)", border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-lg)", padding: "1rem" }}>
           <div style={{ fontSize: 11, fontWeight: 500, color: "var(--color-text-secondary)", marginBottom: 8 }}>Tabla de posiciones</div>
           {leaderboard.length === 0 && <div style={{ fontSize: 12, color: "var(--color-text-tertiary)" }}>Esperando jugadores...</div>}
-          {leaderboard.map((row, i) => (
-            <div key={row.id} style={{
-              display: "flex", justifyContent: "space-between", alignItems: "center",
-              padding: "5px 0", borderBottom: i < leaderboard.length - 1 ? "0.5px solid var(--color-border-tertiary)" : "none", fontSize: 12,
-            }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <span style={{ color: i === 0 ? "#BA7517" : i === 1 ? "#5F5E5A" : i === 2 ? "#993C1D" : "var(--color-text-tertiary)", fontWeight: 500, minWidth: 18 }}>{i + 1}.</span>
-                <span style={{ color: row.id === sessionId ? "#3C3489" : "var(--color-text-primary)", fontWeight: row.id === sessionId ? 500 : 400 }}>
-                  {row.name}{row.id === sessionId ? " ★" : ""}
-                </span>
-              </div>
-              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <span style={{ fontSize: 10, color: "var(--color-text-tertiary)" }}>{ZONES[Math.min(row.zone ?? 0, 4)]?.name}</span>
-                <span style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>{row.height}m</span>
-                <span style={{ fontSize: 10, color: "#085041" }}>
-                  {row.total > 0 ? `${Math.round((row.correct / row.total) * 100)}%` : "—"}
-                </span>
-              </div>
-            </div>
-          ))}
-        </div>
-
-        {/* Zone map */}
-        <div style={{ background: "var(--color-background-primary)", border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-lg)", padding: "1rem" }}>
-          <div style={{ fontSize: 11, fontWeight: 500, color: "var(--color-text-secondary)", marginBottom: 8 }}>Zonas</div>
-          {[...ZONES].reverse().map((z, i) => {
-            const zi = ZONES.length - 1 - i;
-            const active = zi === zone;
-            const passed = zi > zone;
+          {leaderboard.map((row, i) => {
+            const rowPct = Math.min(100, (row.height / maxHeight) * 100);
+            const isMe = row.id === sessionId;
             return (
-              <div key={z.name} style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0", fontSize: 12, opacity: zi < zone ? 0.35 : 1 }}>
-                <div style={{ width: 7, height: 7, borderRadius: "50%", background: active ? "#7F77DD" : passed ? "#5DCAA5" : "var(--color-border-secondary)", flexShrink: 0 }} />
-                <span style={{ color: active ? "var(--color-text-primary)" : "var(--color-text-secondary)", fontWeight: active ? 500 : 400 }}>{z.name}</span>
-                {active && <span style={{ fontSize: 9, background: "#EEEDFE", color: "#534AB7", padding: "1px 6px", borderRadius: 8 }}>actual</span>}
-                {passed && <span style={{ fontSize: 10, color: "#085041" }}>✓</span>}
+              <div key={row.id} style={{
+                padding: "5px 0",
+                borderBottom: i < leaderboard.length - 1 ? "0.5px solid var(--color-border-tertiary)" : "none",
+              }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12 }}>
+                    <span style={{ color: i === 0 ? "#BA7517" : i === 1 ? "#5F5E5A" : i === 2 ? "#993C1D" : "var(--color-text-tertiary)", fontWeight: 500, minWidth: 16 }}>{i + 1}.</span>
+                    <span style={{ color: isMe ? "#3C3489" : "var(--color-text-primary)", fontWeight: isMe ? 500 : 400 }}>
+                      {row.name}{isMe ? " ★" : ""}
+                    </span>
+                  </div>
+                  <div style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 11 }}>
+                    <span style={{ color: "var(--color-text-tertiary)" }}>{ZONES[Math.min(row.zone ?? 0, 4)]?.name}</span>
+                    <span style={{ fontWeight: 500, color: "var(--color-text-primary)" }}>{row.height}m</span>
+                    <span style={{ color: "#085041" }}>{row.total > 0 ? `${Math.round((row.correct / row.total) * 100)}%` : "—"}</span>
+                  </div>
+                </div>
+                {/* Mini progress bar per player */}
+                <div style={{ height: 3, background: "var(--color-background-secondary)", borderRadius: 2, overflow: "hidden" }}>
+                  <div style={{ width: `${rowPct}%`, height: "100%", background: isMe ? "#7F77DD" : "#E24B4A", borderRadius: 2, opacity: isMe ? 1 : 0.6, transition: "width .8s" }} />
+                </div>
               </div>
             );
           })}
         </div>
+
       </div>
     </div>
   );
