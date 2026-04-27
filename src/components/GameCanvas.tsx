@@ -32,9 +32,9 @@ function shuffle<T>(arr: T[]): T[] {
 }
 
 // Pre-generate star positions (deterministic)
-const STARS = Array.from({ length: 200 }, (_, i) => ({
+const STARS = Array.from({ length: 220 }, (_, i) => ({
   x: ((i * 2971 + 13) % WORLD_W),
-  y: ((i * 1637 + 7) % 1400),   // top part of world
+  y: ((i * 1637 + 7) % 2200),   // top part of world
   r: 0.6 + (i % 4) * 0.35,
   twinkle: (i % 7) * 0.9,
 }));
