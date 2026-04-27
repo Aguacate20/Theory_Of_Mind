@@ -8,12 +8,45 @@ const GameCanvas = dynamic(() => import("@/components/GameCanvas"), { ssr: false
 const TeacherPanel = dynamic(() => import("@/components/TeacherPanel"), { ssr: false });
 
 type Role = "student" | "teacher";
-type Stage = "role" | "name" | "character" | "playing" | "teacher_panel";
+type Stage = "activity" | "role" | "name" | "character" | "playing" | "teacher_panel";
 
 function generateId() { return Math.random().toString(36).slice(2, 10); }
 
 export default function Home() {
-  const [stage, setStage] = useState<Stage>("role");
+  const [stage, setStage] = useState<Stage>("activity");
+
+  // ── Activity selection ─────────────────────────────────────────────────────
+  if (stage === "activity") return (
+    <main style={{ minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", padding:"2rem" }}>
+      <div style={{ width:"100%", maxWidth:480 }}>
+        <div style={{ textAlign:"center", marginBottom:"2rem" }}>
+          <div style={{ fontSize:52, lineHeight:1.1, marginBottom:8 }}>🧠</div>
+          <h1 style={{ fontSize:24, fontWeight:500, marginBottom:6 }}>Teoría de la Mente</h1>
+          <p style={{ fontSize:13, color:"var(--color-text-secondary)", lineHeight:1.6 }}>Dos actividades para explorar los enfoques teóricos. El profesor indica cuál usar.</p>
+        </div>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:16 }}>
+          <button onClick={() => { window.location.href = "/learn"; }}
+            style={{ padding:"24px 16px", border:"0.5px solid var(--color-border-secondary)", borderRadius:"var(--border-radius-lg)", background:"var(--color-background-primary)", cursor:"pointer", textAlign:"center" }}
+            onMouseEnter={e => (e.currentTarget.style.background = "var(--color-background-secondary)")}
+            onMouseLeave={e => (e.currentTarget.style.background = "var(--color-background-primary)")}>
+            <div style={{ fontSize:36, marginBottom:10 }}>🗺️</div>
+            <div style={{ fontSize:14, fontWeight:500, color:"var(--color-text-primary)", marginBottom:4 }}>El Archivo de la Mente</div>
+            <div style={{ fontSize:11, color:"var(--color-text-tertiary)", lineHeight:1.5 }}>Exploración cooperativa · Construye el mapa conceptual colectivo</div>
+            <div style={{ marginTop:10, fontSize:10, background:"#E1F5EE", color:"#085041", padding:"3px 8px", borderRadius:8, display:"inline-block" }}>Actividad 1 — Aprendizaje</div>
+          </button>
+          <button onClick={() => setStage("role")}
+            style={{ padding:"24px 16px", border:"0.5px solid var(--color-border-secondary)", borderRadius:"var(--border-radius-lg)", background:"var(--color-background-primary)", cursor:"pointer", textAlign:"center" }}
+            onMouseEnter={e => (e.currentTarget.style.background = "var(--color-background-secondary)")}
+            onMouseLeave={e => (e.currentTarget.style.background = "var(--color-background-primary)")}>
+            <div style={{ fontSize:36, marginBottom:10 }}>🚀</div>
+            <div style={{ fontSize:14, fontWeight:500, color:"var(--color-text-primary)", marginBottom:4 }}>ToM Runner</div>
+            <div style={{ fontSize:11, color:"var(--color-text-tertiary)", lineHeight:1.5 }}>Competencia individual · Escala desde la playa hasta el espacio</div>
+            <div style={{ marginTop:10, fontSize:10, background:"#EEEDFE", color:"#3C3489", padding:"3px 8px", borderRadius:8, display:"inline-block" }}>Actividad 2 — Evaluación</div>
+          </button>
+        </div>
+      </div>
+    </main>
+  );
   const [role, setRole] = useState<Role>("student");
   const [name, setName] = useState("");
   const [character, setCharacter] = useState<CharacterDef | null>(null);
