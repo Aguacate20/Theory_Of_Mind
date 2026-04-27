@@ -1,13 +1,18 @@
-export const LEARN_W = 3200;
-export const LEARN_H = 3200;
-export const VIEW_W = 820;
-export const VIEW_H = 560;
+// ── World dimensions ─────────────────────────────────────────────────────────
+export const TILE_SIZE  = 32;          // pixels per tile
+export const GRID_COLS  = 120;         // 120 × 32 = 3840 px
+export const GRID_ROWS  = 120;
+export const LEARN_W    = GRID_COLS * TILE_SIZE; // 3840
+export const LEARN_H    = GRID_ROWS * TILE_SIZE; // 3840
+export const VIEW_W     = 820;
+export const VIEW_H     = 560;
 export const PLAYER_SPEED = 3.2;
-export const PLAYER_SIZE = 20;
+export const PLAYER_SIZE  = 20;
 
-const CX = LEARN_W / 2;  // 1600
-const CY = LEARN_H / 2;  // 1600
+const CX = LEARN_W / 2;  // 1920
+const CY = LEARN_H / 2;  // 1920
 
+// ── Room type ─────────────────────────────────────────────────────────────────
 export type Room = {
   id: "sur" | "oeste" | "este" | "norte" | "centro" | "entrada";
   label: string;
@@ -18,7 +23,6 @@ export type Room = {
   wallColor: string;
   accentColor: string;
   description: string;
-  // Floor pattern: "tile" | "wood" | "stone" | "marble" | "carpet"
   pattern: "tile" | "wood" | "stone" | "marble" | "carpet";
 };
 
@@ -85,62 +89,117 @@ export const ROOMS: Room[] = [
   },
 ];
 
-// Corridors as walkable rectangles: { x1, y1, x2, y2 }
+// ── Corridors (pixel rectangles: x1 y1 → x2 y2) ──────────────────────────────
+// Mínimo 64 px de ancho (2 tiles) para que el jugador pase limpio.
 export const CORRIDORS = [
-  // South corridor: centro bottom → sur top
-  { x1: CX - 65, y1: CY + 250, x2: CX + 65, y2: CY + 475 },
-  // North corridor: norte bottom → centro top
-  { x1: CX - 65, y1: CY - 475, x2: CX + 65, y2: CY - 250 },
-  // East corridor: centro right → este left
-  { x1: CX + 250, y1: CY - 65, x2: CX + 500, y2: CY + 65 },
-  // West corridor: oeste right → centro left
-  { x1: CX - 500, y1: CY - 65, x2: CX - 250, y2: CY + 65 },
-  // Entrance corridor: sur bottom → entrada top
-  { x1: CX - 65, y1: CY + 925, x2: CX + 65, y2: CY + 1025 },
+  // Sur: centro bottom → sur top
+  { x1: CX - 64, y1: CY + 250, x2: CX + 64, y2: CY + 475 },
+  // Norte: norte bottom → centro top
+  { x1: CX - 64, y1: CY - 475, x2: CX + 64, y2: CY - 250 },
+  // Este: centro right → este left
+  { x1: CX + 250, y1: CY - 64, x2: CX + 500, y2: CY + 64 },
+  // Oeste: oeste right → centro left
+  { x1: CX - 500, y1: CY - 64, x2: CX - 250, y2: CY + 64 },
+  // Entrada: sur bottom → entrada top
+  { x1: CX - 64, y1: CY + 925, x2: CX + 64, y2: CY + 1025 },
 ];
 
-/** Returns true if (x,y) is inside any walkable area */
-export function isWalkable(x: number, y: number): boolean {
-  const r = PLAYER_SIZE / 2;
-  for (const room of ROOMS) {
-    if (
-      x - r >= room.x - room.w / 2 &&
-      x + r <= room.x + room.w / 2 &&
-      y - r >= room.y - room.h / 2 &&
-      y + r <= room.y + room.h / 2
-    ) return true;
-  }
-  for (const c of CORRIDORS) {
-    if (x - r >= c.x1 && x + r <= c.x2 && y - r >= c.y1 && y + r <= c.y2) return true;
-  }
-  return false;
+// ── Tile map (generated once at load) ────────────────────────────────────────
+//
+//  GRID_COLS × GRID_ROWS Uint8Array.
+//  0 = pared (no caminable)
+//  1 = suelo (caminable)
+//
+//  isWalkable() verifica las 4 esquinas del jugador contra este grid.
+//  Si cualquier esquina cae en tile 0 → movimiento bloqueado.
+//  Ninguna esquina se puede "colar" por el hueco entre salas.
+
+function buildTileMap(): Uint8Array {
+  const map = new Uint8Array(GRID_COLS * GRID_ROWS); // todo 0 por defecto
+
+  /** Marca como caminable un rectángulo en coordenadas de pixel (centro + tamaño). */
+  const markCentered = (px: number, py: number, pw: number, ph: number) => {
+    const tx1 = Math.max(0,           Math.floor((px - pw / 2) / TILE_SIZE));
+    const ty1 = Math.max(0,           Math.floor((py - ph / 2) / TILE_SIZE));
+    const tx2 = Math.min(GRID_COLS,   Math.ceil ((px + pw / 2) / TILE_SIZE));
+    const ty2 = Math.min(GRID_ROWS,   Math.ceil ((py + ph / 2) / TILE_SIZE));
+    for (let ty = ty1; ty < ty2; ty++)
+      for (let tx = tx1; tx < tx2; tx++)
+        map[ty * GRID_COLS + tx] = 1;
+  };
+
+  /** Marca como caminable un rectángulo en coordenadas de pixel (esquina superior-izquierda). */
+  const markCorner = (x1: number, y1: number, x2: number, y2: number) => {
+    const tx1 = Math.max(0,           Math.floor(x1 / TILE_SIZE));
+    const ty1 = Math.max(0,           Math.floor(y1 / TILE_SIZE));
+    const tx2 = Math.min(GRID_COLS,   Math.ceil (x2 / TILE_SIZE));
+    const ty2 = Math.min(GRID_ROWS,   Math.ceil (y2 / TILE_SIZE));
+    for (let ty = ty1; ty < ty2; ty++)
+      for (let tx = tx1; tx < tx2; tx++)
+        map[ty * GRID_COLS + tx] = 1;
+  };
+
+  for (const room of ROOMS)
+    markCentered(room.x, room.y, room.w, room.h);
+
+  for (const c of CORRIDORS)
+    markCorner(c.x1, c.y1, c.x2, c.y2);
+
+  return map;
 }
 
-// ── Artifact world positions — well spread inside each room ──────────────────
-// Each room is 500-600px wide so artifacts 150-200px apart
+/** Tile map global — 120×120 celdas, generado una sola vez. */
+export const TILE_MAP: Uint8Array = buildTileMap();
 
+/**
+ * Devuelve true si la posición (x, y) es caminable.
+ *
+ * Verifica las 4 esquinas del bounding-box del jugador contra TILE_MAP.
+ * Si cualquiera cae fuera del mapa o en un tile 0 → false.
+ */
+export function isWalkable(x: number, y: number): boolean {
+  const r = PLAYER_SIZE / 2;
+
+  const corners: [number, number][] = [
+    [x - r, y - r], // superior-izquierda
+    [x + r, y - r], // superior-derecha
+    [x - r, y + r], // inferior-izquierda
+    [x + r, y + r], // inferior-derecha
+  ];
+
+  for (const [cx, cy] of corners) {
+    const tx = Math.floor(cx / TILE_SIZE);
+    const ty = Math.floor(cy / TILE_SIZE);
+    // Fuera del mapa → pared
+    if (tx < 0 || tx >= GRID_COLS || ty < 0 || ty >= GRID_ROWS) return false;
+    if (TILE_MAP[ty * GRID_COLS + tx] === 0) return false;
+  }
+  return true;
+}
+
+// ── Artifact world positions ──────────────────────────────────────────────────
 export const ARTIFACT_WORLD_POS: Record<string, { x: number; y: number }> = {
-  // Sur room (CX, CY+700) — 600×450 — 5 artifacts
+  // Sur (CX, CY+700) — 600×450
   tt_01: { x: CX - 200, y: CY + 560 },
   tt_02: { x: CX + 200, y: CY + 580 },
   tt_03: { x: CX - 210, y: CY + 780 },
   tt_04: { x: CX + 210, y: CY + 800 },
   tt_05: { x: CX,       y: CY + 690 },
 
-  // Este room (CX+750, CY) — 500×500 — 6 artifacts
+  // Este (CX+750, CY) — 500×500
   sim_01: { x: CX + 580, y: CY - 160 },
   sim_02: { x: CX + 900, y: CY - 170 },
-  sim_03: { x: CX + 750, y: CY      },
+  sim_03: { x: CX + 750, y: CY       },
   int_01: { x: CX + 590, y: CY + 160 },
   int_02: { x: CX + 900, y: CY + 170 },
   int_03: { x: CX + 750, y: CY - 60  },
 
-  // Oeste room (CX-750, CY) — 500×500 — 3 artifacts
+  // Oeste (CX-750, CY) — 500×500
   mod_01: { x: CX - 900, y: CY - 120 },
   mod_02: { x: CX - 590, y: CY - 100 },
   mod_03: { x: CX - 750, y: CY + 130 },
 
-  // Norte room (CX, CY-700) — 600×450 — 4 artifacts
+  // Norte (CX, CY-700) — 600×450
   neu_01:  { x: CX - 200, y: CY - 790 },
   neu_02:  { x: CX + 200, y: CY - 810 },
   int2_01: { x: CX - 180, y: CY - 610 },
